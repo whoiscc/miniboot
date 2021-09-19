@@ -175,10 +175,10 @@ class Memory:
 
 
 class Computer:
-    def __init__(self, init_pointer):
+    def __init__(self):
         self.memory = Memory()
         self.rega, self.regb, self.regc, self.regd = 0, 0, 0, 0
-        self.pointer = init_pointer
+        self.pointer = 0x400000
         self.is_running = False
 
     def preload_program(self, inst_list):
@@ -257,7 +257,7 @@ def parse_program(source):
 
 
 if __name__ == "__main__":
-    computer = Computer(0x2000)
+    computer = Computer()
     with open(argv[1]) as source_file:
         program = parse_program(source_file)
         computer.preload_program(program)
