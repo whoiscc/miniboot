@@ -19,34 +19,12 @@ itself, which will be written into memory before execution. Take 4 immediate
 numbers, each should be 8 bits. `.data` and instruction cannot exist in the same 
 page, and `.data` page can be accessed during execution.
 
-**`load`** 
-Read into %A, from memory address specified by $B. $B must align to 8.
-
-**`store64`/`store32`/`store16`/`store8`** 
-Write the low 64/32/16/8 bit of $A to memory address specified by $B. $B must 
-align to 8/4/2/1.
-
-**`loadb`/`loadc`/`loadd`** 
-Override %A with $B/$C/$D.
-
-**`storeb`/`storec`/`stored`** 
-Override %B/%C/%D with $A.
-
-**`imm`** 
-Override the low 24 bit of %A with immediate number.
-
-**`int`**
-Interrupt execution and according to immediate number:
-* `0` exit with code $A
-* `1` start a debugger
-* `2` print memory content to a output stream, stream descriptor speicified by 
-  $A, buffer address specified by $B, buffer length specified by $C
-
-**`shiftl`**
-Left bit-shift %A by immediate number, zero-padding.
+**Insturctions.**
+See `Computer.run` for their functions.
 
 """
 from sys import argv, stdin, stdout, stderr
+from configparser import ConfigParser
 
 
 PAGE_SIZE = 2 ** 12
@@ -59,7 +37,7 @@ class Page:
         self.start = start
 
     def preload_data(self, offset, a, b, c, d):
-        assert offset % 4 == 0, "preload data not align to 4"
+        assert offset % 4 == 0, f"preload data not align to 4: {self.start + offset:#x}"
         self.mem[offset + 0] = a
         self.mem[offset + 1] = b
         self.mem[offset + 2] = c
@@ -67,7 +45,7 @@ class Page:
 
     def preload_instruction(self, offset, inst):
         raise RuntimeError(
-            f"cannot preload instruction into unprotected page {hex(self.start)}"
+            f"cannot preload instruction into unprotected page: {self.start + offset:#x}"
         )
 
     def get_slice(self, offset, length):
@@ -75,7 +53,7 @@ class Page:
 
     def load_instruction(self, offset):
         raise RuntimeError(
-            f"cannot load instruction from unprotectecd page {hex(self.start)}"
+            f"cannot load instruction from unprotectecd page: {self.start + offset:#x}"
         )
 
 
@@ -85,21 +63,29 @@ class ProtectedPage:
         self.start = start
 
     def preload_data(self, offset, a, b, c, d):
-        raise RuntimeError(f"cannot preload data into protected page {hex(self.start)}")
+        raise RuntimeError(
+            f"cannot preload data into protected page: {self.start + offset:#x}"
+        )
 
     def preload_instruction(self, offset, inst):
-        assert offset % INST_SIZE == 0, f"instruction address not align to {INST_SIZE}"
+        assert (
+            offset % INST_SIZE == 0
+        ), f"instruction address not align to {INST_SIZE}: {self.start + offset:#x}"
         index = offset // INST_SIZE
         assert (
             self.mem[index] is None
-        ), f"override instruction at {hex(self.start + offset)}"
+        ), f"override instruction at {self.start + offset:#x}"
         self.mem[index] = inst
 
     def get_slice(self, offset, length):
-        raise RuntimeError(f"illegal access to protected page {hex(self.start)}")
+        raise RuntimeError(
+            f"illegal access to protected page: {self.start + offset:#x}"
+        )
 
     def load_instruction(self, offset):
-        assert offset % INST_SIZE == 0, f"instruction address not align to {INST_SIZE}"
+        assert (
+            offset % INST_SIZE == 0
+        ), f"instruction address not align to {INST_SIZE}: {self.start + offset:#x}"
         index = offset // INST_SIZE
         return self.mem[index]
 
@@ -128,6 +114,9 @@ class Memory:
         slice = []
         page_index, page_offset = address // PAGE_SIZE, address % PAGE_SIZE
         while len(slice) < length:
+            assert (
+                page_index in self.page_table
+            ), f"segmentation fault: {page_index * PAGE_SIZE:#x}"
             slice += self.page_table[page_index].get_slice(
                 page_offset, length - len(slice)
             )
@@ -137,6 +126,7 @@ class Memory:
 
     def load_instruction(self, address):
         page_index, page_offset = address // PAGE_SIZE, address % PAGE_SIZE
+        assert page_index in self.page_table, f"segmentation fault: {address:#x}"
         return self.page_table[page_index].load_instruction(page_offset)
 
 
@@ -156,16 +146,30 @@ class Computer:
             else:
                 self.memory.preload_instruction(address, inst)
 
+    def open_file(self, descriptor, file_type, path):
+        if file_type == "infile":
+            file = open(path, mode="r")
+        elif file_type == "outfile":
+            file = open(path, mode="w")
+        elif file_type == "socket":
+            raise NotImplementedError()
+        else:
+            raise RuntimeError(f"unsupported file type: {file_type}")
+        self.descriptor_table[descriptor] = file
+
     def run(self):
         self.is_running = True
         while self.is_running:
             inst = self.memory.load_instruction(self.pointer)
+            assert inst is not None, f"illegal instruction access at {self.pointer:#x}"
             self.pointer += INST_SIZE
             code, operand = inst["code"], inst.get("operand", None)
             if code == "shiftl":
-                self.rega = (self.rega << operand) & (2 ** 64 - 1)
+                self.rega %= 2 ** (64 - operand)
+                self.rega *= 2 ** operand
             elif code == "imm":
-                self.rega = self.rega & ~0xFFFFFF | operand
+                self.rega -= self.rega % (2 ** 24)
+                self.rega += operand
             elif code == "storeb":
                 self.regb = self.rega
             elif code == "storec":
@@ -185,6 +189,8 @@ class Computer:
             desc, address, length = self.rega, self.regb, self.regc
             slice = self.memory.get_slice(address, length)
             self.descriptor_table[desc].write(bytes(slice).decode())
+        else:
+            raise RuntimeError(f"illegal interrupt operation: {opcode}")
 
 
 def parse_program(source):
@@ -193,13 +199,12 @@ def parse_program(source):
         line = line.split(";")[0].strip()
         if len(line) == 0:
             continue
+
         if line.startswith("0x"):
             address = int(line, base=16)
             continue
 
-        if len(line.split()) == 1:
-            inst = {"code": line}
-        elif line.split()[0] == ".data":
+        if line.split()[0] == ".data":
             _, a, b, c, d = line.split()
             inst = {
                 "code": ".data",
@@ -210,6 +215,8 @@ def parse_program(source):
                     int(d, base=16),
                 ),
             }
+        elif len(line.split()) == 1:
+            inst = {"code": line}
         else:
             code, operand = line.split()
             inst = {"code": code, "operand": int(operand, base=16)}
@@ -222,8 +229,22 @@ def parse_program(source):
 
 
 if __name__ == "__main__":
+    cfg = ConfigParser()
+    cfg.read(argv[1])
     computer = Computer()
-    with open(argv[1]) as source_file:
-        program = parse_program(source_file)
-        computer.preload_program(program)
+    for source_path in cfg["program"]["sources"].splitlines():
+        source_path = source_path.strip()
+        if len(source_path) == 0:
+            continue
+        with open(source_path) as source:
+            prog = parse_program(source)
+            computer.preload_program(prog)
+    for key, section in cfg.items():
+        if key in {"DEFAULT", "program"}:
+            continue
+        if key.startswith("descriptor"):
+            _, desc = key.split(".")
+            desc = int(desc, base=16)
+            computer.open_file(desc, section["type"], section["path"])
+
     computer.run()
