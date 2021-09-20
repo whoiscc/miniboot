@@ -1,3 +1,6 @@
+; hi.misc [start point]
+; segment 0, page 0x400### - 0x40f###
+
 0x40f000
 ; string literal "Hello, world!\n"
 .data       48 65 6c 6c
@@ -7,21 +10,19 @@
 
 0x400000
 ; load immediate number (0000 0000 0040 f000)16 into RA
-shiftl      3f
-shiftl      1   ; left shift 64 bits, zero-clear RA
-imm16       40f
+shiftl      40
+imm         40f
 shiftl      c   ; left shift 12 bits
 ; store buffer address in RB
 storeb
 ; load immediate number (14)10 into RA
-shiftl      3f
-shiftl      1
-imm16       e
+shiftl      40
+imm         e
 ; store buffer length in RC
 storec
-; load immediate number (0) into RA
-shiftl      3f
-shiftl      1
+; load immediate number (1) into RA
+shiftl      40
+imm         1
 ; interrupt: print to stream 0
 int         2
 ; interrupt: exit code 0

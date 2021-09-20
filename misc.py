@@ -13,40 +13,6 @@ Minimal Instruction Set Computer. The following gives instruction specification.
 
 ----
 
-# The Computer
-
-**Registers.** There are 4 general purpose register called RA, RB, RC and RD,
-each with 64 bits. No instruction reference registers by name, so the name is 
-only for documentation. Some instructions implicitly access to certain 
-registers, and some instructions only access to some bits of registers. Normally
-instructions do not access RD, so it is suitable for storing stack base address.
-
-**Memory.** Addresses are indexed per byte. Valid address space is from 0 to
-2^64 - 1. The implementation only *allocate* memory per 4KB page upon first
-accessing, so sparsely accessing address space is safe. The program is stored
-at fixed address before execution, and any load/store attempt that perform on
-program pages during execution is illegal. Some part of memory can be mapped to
-file. If the file exists prior to execution, the content of file will be stored
-into specified memory, and after execution the content of memory will be written
-back to file. To help development, the implementation only writes back if the
-program exit sucessfully, and the writing-back will be store in `filename.1` to
-avoid in-place overriding.
-
-# The instructions
-
-Each instruction virtually takes 32 bits. The instructions do not have a binary 
-representation, so the size definition is only for defining the offset of each 
-instruction in a program. The operand of instructions is immediate number, which 
-is at most 24 bits long.
-
-Instruction may not store continuously. If an instruction do not store in the
-following address of previous instruction in the program text, it should be
-prefixed with its address. Overriding instruction is illegal.
-
-The literal includes address, instruction name, immediate number and comment. 
-Immediate number is written in hex without 0x prefix. Comment starts with 
-semicolon. Address is written in hex with 0x prefix on separated line.
-
 **`.data`**
 Special pseudo instruction, define 32 bits of data located in the address of 
 itself, which will be written into memory before execution. Take 4 immediate 
@@ -54,33 +20,33 @@ numbers, each should be 8 bits. `.data` and instruction cannot exist in the same
 page, and `.data` page can be accessed during execution.
 
 **`load`** 
-Read into RA, from memory address specified by RB. (RB) must align to 8.
+Read into %A, from memory address specified by $B. $B must align to 8.
 
 **`store64`/`store32`/`store16`/`store8`** 
-Write the low 64/32/16/8 bit of RA to memory address specified by RB. (RB) must 
+Write the low 64/32/16/8 bit of $A to memory address specified by $B. $B must 
 align to 8/4/2/1.
 
 **`loadb`/`loadc`/`loadd`** 
-Override RA with RB/RC/RD.
+Override %A with $B/$C/$D.
 
 **`storeb`/`storec`/`stored`** 
-Override RB/RC/RD with RA.
+Override %B/%C/%D with $A.
 
-**`imm24`/`imm16`** 
-Override the low 24/16 bit of RA with immediate number.
+**`imm`** 
+Override the low 24 bit of %A with immediate number.
 
 **`int`**
 Interrupt execution and according to immediate number:
-* `0` exit with code RA
+* `0` exit with code $A
 * `1` start a debugger
 * `2` print memory content to a output stream, stream descriptor speicified by 
-  RA, buffer address specified by RB, buffer length specified by RC
+  $A, buffer address specified by $B, buffer length specified by $C
 
 **`shiftl`**
-Left bit-shift RA by immediate number, at most 6 bits long. Zero-padding.
+Left bit-shift %A by immediate number, zero-padding.
 
 """
-from sys import argv
+from sys import argv, stdin, stdout, stderr
 
 
 PAGE_SIZE = 2 ** 12
@@ -180,6 +146,7 @@ class Computer:
         self.rega, self.regb, self.regc, self.regd = 0, 0, 0, 0
         self.pointer = 0x400000
         self.is_running = False
+        self.descriptor_table = {0: stdin, 1: stdout, 2: stderr}
 
     def preload_program(self, inst_list):
         for address, inst in inst_list:
@@ -197,8 +164,8 @@ class Computer:
             code, operand = inst["code"], inst.get("operand", None)
             if code == "shiftl":
                 self.rega = (self.rega << operand) & (2 ** 64 - 1)
-            elif code == "imm16":
-                self.rega = self.rega & ~0xFFFF | operand
+            elif code == "imm":
+                self.rega = self.rega & ~0xFFFFFF | operand
             elif code == "storeb":
                 self.regb = self.rega
             elif code == "storec":
@@ -206,20 +173,18 @@ class Computer:
             elif code == "int":
                 self.interrupt(operand)
             else:
-                raise RuntimeError(f"unkown instruction code {code}")
+                raise RuntimeError(f"illegal instruction: {code}")
 
-    def interrupt(self, kind):
-        if kind == 0:
+    def interrupt(self, opcode):
+        if opcode == 0:
             self.is_running = False
             # TODO save exit code
-        elif kind == 1:
+        elif opcode == 1:
             raise NotImplementedError()
-        elif kind == 2:
-            descriptor, address, length = self.rega, self.regb, self.regc
-            if descriptor != 0:
-                raise NotImplementedError()
+        elif opcode == 2:
+            desc, address, length = self.rega, self.regb, self.regc
             slice = self.memory.get_slice(address, length)
-            print(bytes(slice).decode(), end="")
+            self.descriptor_table[desc].write(bytes(slice).decode())
 
 
 def parse_program(source):
