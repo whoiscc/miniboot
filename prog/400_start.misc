@@ -1,0 +1,71 @@
+; 400_start.misc [start point]
+; segment 0, page 0x400###
+
+
+0x400000
+
+; allocate (2048)10 pages (8MB) as stack
+shl     40
+imm     800
+int     2
+; assign stack base address to %D
+; %D <- $B
+ldb
+std
+
+; calling convention (caller side)
+; step 1, save return address on stack
+; dst = $D + 248
+ldd
+stb
+shl     40
+imm     f8
+add
+stb
+shl     40
+imm     400100
+st64
+
+; step 2, save arguments on stack
+; in this case nothing
+
+; step 3, assign stack base address of callee (i.e. address of first argument) to %D
+; %D <- $D + 256
+ldd
+stb
+shl     40
+imm     100
+add
+std
+
+; step 4, jump to callee, 0x401000
+shl     40
+imm     401000
+stb
+jmp
+
+
+0x400100
+
+; step 5, unwind stack base address
+; %D <- $D - 256
+ldd
+stb
+shl     40
+imm     100
+neg
+add
+std
+
+; step 6, expect return value at base address of callee
+; src = $D + 256
+ldd
+stb
+shl     40
+imm     100
+add
+stb
+ld
+
+; exit with return value
+int     0

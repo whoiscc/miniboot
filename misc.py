@@ -27,6 +27,7 @@ from sys import argv, stdin, stdout, stderr
 from configparser import ConfigParser
 
 
+SEGMENT_SIZE = 2 ** 24
 PAGE_SIZE = 2 ** 12
 INST_SIZE = 4
 
@@ -50,6 +51,10 @@ class Page:
 
     def get_slice(self, offset, length):
         return self.mem[offset : offset + length]
+
+    def set_slice(self, offset, slice):
+        assert offset + len(slice) <= PAGE_SIZE
+        self.mem[offset : offset + len(slice)] = slice
 
     def load_instruction(self, offset):
         raise RuntimeError(
@@ -78,6 +83,11 @@ class ProtectedPage:
         self.mem[index] = inst
 
     def get_slice(self, offset, length):
+        raise RuntimeError(
+            f"illegal access to protected page: {self.start + offset:#x}"
+        )
+
+    def set_slice(self, offset, slice):
         raise RuntimeError(
             f"illegal access to protected page: {self.start + offset:#x}"
         )
@@ -124,6 +134,19 @@ class Memory:
             page_offset = 0
         return slice
 
+    def set_slice(self, address, slice):
+        page_index, page_offset = address // PAGE_SIZE, address % PAGE_SIZE
+        while len(slice) > 0:
+            assert (
+                page_index in self.page_table
+            ), f"segmentation fault: {page_index * PAGE_SIZE:#x}"
+            self.page_table[page_index].set_slice(
+                page_offset, slice[: PAGE_SIZE - page_offset]
+            )
+            slice = slice[PAGE_SIZE - page_offset :]
+            page_index += 1
+            page_offset = 0
+
     def load_instruction(self, address):
         page_index, page_offset = address // PAGE_SIZE, address % PAGE_SIZE
         assert page_index in self.page_table, f"segmentation fault: {address:#x}"
@@ -137,25 +160,51 @@ class Computer:
         self.pointer = 0x400000
         self.is_running = False
         self.descriptor_table = {0: stdin, 1: stdout, 2: stderr}
+        self.next_alloc = 0 + 1 * SEGMENT_SIZE
+        self.exit_code = None
+        self.nb_inst = 0
+        self.nb_data = 0
 
     def preload_program(self, inst_list):
         for address, inst in inst_list:
             if inst["code"] == ".data":
                 a, b, c, d = inst["data"]
                 self.memory.preload_data(address, a, b, c, d)
+                self.nb_data += 4
             else:
                 self.memory.preload_instruction(address, inst)
+                self.nb_inst += 1
+
+            self.next_alloc = max(
+                self.next_alloc, SEGMENT_SIZE * (address // SEGMENT_SIZE + 1)
+            )
 
     def open_file(self, descriptor, file_type, path):
-        if file_type == "infile":
-            file = open(path, mode="r")
-        elif file_type == "outfile":
-            file = open(path, mode="w")
+        if file_type == "readfile":
+            file = open(path, mode="rb")
+        elif file_type == "writefile":
+            file = open(path, mode="wb")
+        elif file_type == "appendfile":
+            file = open(path, mode="ab")
         elif file_type == "socket":
             raise NotImplementedError()
         else:
             raise RuntimeError(f"unsupported file type: {file_type}")
         self.descriptor_table[descriptor] = file
+
+    def summary(self):
+        return {
+            "Total page number": len(self.memory.page_table),
+            "Protected page number": sum(
+                1
+                for page in self.memory.page_table.values()
+                if isinstance(page, ProtectedPage)
+            ),
+            "Instruction number": self.nb_inst,
+            "Data size (bytes)": self.nb_data,
+            "Next allocate address": f"{self.next_alloc:#x}",
+            "Exit code": self.exit_code,
+        }
 
     def run(self):
         self.is_running = True
@@ -163,17 +212,49 @@ class Computer:
             inst = self.memory.load_instruction(self.pointer)
             assert inst is not None, f"illegal instruction access at {self.pointer:#x}"
             self.pointer += INST_SIZE
+            # print(
+            #     f"A: {self.rega:#12x} B: {self.regb:#12x} "
+            #     f"C: {self.regc:#12x} D: {self.regd:#12x}"
+            # )
+            # print(inst)
             code, operand = inst["code"], inst.get("operand", None)
-            if code == "shiftl":
-                self.rega %= 2 ** (64 - operand)
-                self.rega *= 2 ** operand
-            elif code == "imm":
+            if code == "imm":
                 self.rega -= self.rega % (2 ** 24)
                 self.rega += operand
-            elif code == "storeb":
+            elif code == "ldb":
+                self.rega = self.regb
+            elif code == "ldc":
+                self.rega = self.regc
+            elif code == "ldd":
+                self.rega = self.regd
+            elif code == "stb":
                 self.regb = self.rega
-            elif code == "storec":
+            elif code == "stc":
                 self.regc = self.rega
+            elif code == "std":
+                self.regd = self.rega
+            elif code == "ld":
+                address = self.regb
+                assert address % 8 == 0, "ld address not align to 8"
+                slice = self.memory.get_slice(address, 8)
+                self.rega = sum(slice[i] * (2 ** (i * 8)) for i in range(8))
+            elif code == "st64":
+                data, address = self.rega, self.regb
+                assert address % 8 == 0, "st64 address not align to 8"
+                slice = [data // (2 ** (i * 8)) % (2 ** 8) for i in range(8)]
+                self.memory.set_slice(address, slice)
+
+            elif code == "shl":
+                self.rega %= 2 ** (64 - operand)
+                self.rega *= 2 ** operand
+            elif code == "add":
+                self.rega += self.regb
+                self.rega %= 2 ** 64
+            elif code == "neg":
+                self.rega = -self.rega
+
+            elif code == "jmp":
+                self.pointer = self.regb
             elif code == "int":
                 self.interrupt(operand)
             else:
@@ -182,13 +263,26 @@ class Computer:
     def interrupt(self, opcode):
         if opcode == 0:
             self.is_running = False
-            # TODO save exit code
+            self.exit_code = self.rega
         elif opcode == 1:
             raise NotImplementedError()
         elif opcode == 2:
+            nb_page = self.rega
+            self.regb = self.next_alloc
+            for _ in range(nb_page):
+                self.memory.touch_page(self.next_alloc // PAGE_SIZE, False)
+                self.next_alloc += PAGE_SIZE
+        elif opcode == 3:
+            desc, address, max_length = self.rega, self.regb, self.regc
+            if "b" not in self.descriptor_table[desc]:
+                raise NotImplementedError()
+            slice = self.descriptor_table[desc].read(max_length)
+            self.memory.set_slice(address, list(slice))
+            self.regc = len(slice)
+        elif opcode == 4:
             desc, address, length = self.rega, self.regb, self.regc
             slice = self.memory.get_slice(address, length)
-            self.descriptor_table[desc].write(bytes(slice).decode())
+            self.descriptor_table[desc].write(bytes(slice))
         else:
             raise RuntimeError(f"illegal interrupt operation: {opcode}")
 
@@ -228,6 +322,13 @@ def parse_program(source):
         address += INST_SIZE
 
 
+def print_summary(summary, items):
+    for item, value in summary.items():
+        if item not in items:
+            continue
+        print(f"* {item:24}: {value}")
+
+
 if __name__ == "__main__":
     cfg = ConfigParser()
     cfg.read(argv[1])
@@ -246,5 +347,27 @@ if __name__ == "__main__":
             _, desc = key.split(".")
             desc = int(desc, base=16)
             computer.open_file(desc, section["type"], section["path"])
+    print("** SUMMARY")
+    print_summary(
+        computer.summary(),
+        {
+            "Total page number",
+            "Protected page number",
+            "Instruction number",
+            "Data size (bytes)",
+            "Next allocate address",
+        },
+    )
 
+    print("** PROGRAM START")
     computer.run()
+
+    print("** PROGRAM END")
+    print_summary(
+        computer.summary(),
+        {
+            "Total page number",
+            "Next allocate address",
+            "Exit code",
+        },
+    )
