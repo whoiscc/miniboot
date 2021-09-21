@@ -25,6 +25,7 @@ See `Computer.run` for their functions.
 """
 from sys import argv, stdin, stdout, stderr
 from configparser import ConfigParser
+from json import loads as unquote
 
 
 SEGMENT_SIZE = 2 ** 24
@@ -273,16 +274,19 @@ class Computer:
                 self.memory.touch_page(self.next_alloc // PAGE_SIZE, False)
                 self.next_alloc += PAGE_SIZE
         elif opcode == 3:
-            desc, address, max_length = self.rega, self.regb, self.regc
-            if "b" not in self.descriptor_table[desc]:
+            max_length, address, desc = self.rega, self.regb, self.regc
+            if "b" not in self.descriptor_table[desc].mode:
                 raise NotImplementedError()
             slice = self.descriptor_table[desc].read(max_length)
             self.memory.set_slice(address, list(slice))
-            self.regc = len(slice)
+            self.rega = len(slice)
         elif opcode == 4:
-            desc, address, length = self.rega, self.regb, self.regc
-            slice = self.memory.get_slice(address, length)
-            self.descriptor_table[desc].write(bytes(slice))
+            length, address, desc = self.rega, self.regb, self.regc
+            slice = bytes(self.memory.get_slice(address, length))
+            self.descriptor_table[desc].write(
+                "b" in self.descriptor_table[desc].mode and slice or slice.decode()
+            )
+            # update %A if not write all
         else:
             raise RuntimeError(f"illegal interrupt operation: {opcode}")
 
@@ -298,28 +302,120 @@ def parse_program(source):
             address = int(line, base=16)
             continue
 
-        if line.split()[0] == ".data":
-            _, a, b, c, d = line.split()
-            inst = {
+        assert address is not None, "not specify address for first instruction"
+        code, *operand = [s.strip() for s in line.split(maxsplit=1)]
+        if code.startswith("$"):
+            for inst in expand_macro(code, operand and operand[0], address):
+                yield address, inst
+                address += INST_SIZE
+        else:
+            if code == ".data":
+                a, b, c, d = [int(x, base=16) for x in operand[0].split()]
+                inst = {
+                    "code": ".data",
+                    "data": (a, b, c, d),
+                }
+            elif len(operand) == 0:
+                inst = {"code": line}
+            else:
+                inst = {"code": code, "operand": int(operand[0], base=16)}
+
+            # TODO verify instruction
+            yield address, inst
+            address += INST_SIZE
+
+
+def expand_macro(code, operand, address):
+    if code == "$.str":
+        byte_list = list(unquote(operand).encode()) + [0] * 4
+        return [
+            {
                 "code": ".data",
                 "data": (
-                    int(a, base=16),
-                    int(b, base=16),
-                    int(c, base=16),
-                    int(d, base=16),
+                    byte_list[i + 0],
+                    byte_list[i + 1],
+                    byte_list[i + 2],
+                    byte_list[i + 3],
                 ),
             }
-        elif len(line.split()) == 1:
-            inst = {"code": line}
-        else:
-            code, operand = line.split()
-            inst = {"code": code, "operand": int(operand, base=16)}
+            for i in range(0, len(byte_list) - 4, 4)
+        ]
+    if code == "$ret":
+        return [
+            {"code": "ldd"},
+            {"code": "stb"},
+            {"code": "shl", "operand": 64},
+            {"code": "imm", "operand": 8},
+            {"code": "neg"},
+            {"code": "add"},
+            {"code": "stb"},
+            {"code": "ld"},
+            {"code": "stb"},
+            {"code": "jmp"},
+        ]
+    if code == "$call":
+        target = int(operand, base=16)
+        imm_inst = {"code": "imm", "operand": "?"}
+        inst_list = [
+            {"code": "ldd"},
+            {"code": "stb"},
+            {"code": "shl", "operand": 64},
+            {"code": "imm", "operand": 248},
+            {"code": "add"},
+            {"code": "stb"},
+            {"code": "shl", "operand": 64},
+            imm_inst,
+            {"code": "st64"},
+            {"code": "ldd"},
+            {"code": "stb"},
+            {"code": "shl", "operand": 64},
+            {"code": "imm", "operand": 256},
+            {"code": "add"},
+            {"code": "std"},
+            {"code": "shl", "operand": 64},
+            {"code": "imm", "operand": target},
+            {"code": "stb"},
+            {"code": "jmp"},
+        ]
+        imm_inst["operand"] = address + len(inst_list) * INST_SIZE
+        return inst_list + [
+            {"code": "ldd"},
+            {"code": "stb"},
+            {"code": "shl", "operand": 64},
+            {"code": "imm", "operand": 256},
+            {"code": "neg"},
+            {"code": "add"},
+            {"code": "std"},
+        ]
+    if code == "$lds":
+        offset = int(operand, base=16)
+        return [
+            {"code": "ldd"},
+            {"code": "add"},
+            {"code": "stb"},
+            {"code": "shl", "operand": 64},
+            {"code": "imm", "operand": offset},
+            {"code": "add"},
+            {"code": "stb"},
+            {"code": "ld"},
+        ]
+    if code.startswith("$sts"):
+        assert code in {"$sts8", "$sts16", "$sts32", "$sts64"}
+        offset = int(operand, base=16)
+        return [
+            {"code": "stc"},
+            {"code": "ldd"},
+            {"code": "add"},
+            {"code": "stb"},
+            {"code": "shl", "operand": 64},
+            {"code": "imm", "operand": offset},
+            {"code": "add"},
+            {"code": "stb"},
+            {"code": "ldc"},
+            {"code": code.replace("$sts", "st")},
+        ]
 
-        # TODO verify instruction
-
-        assert address is not None, "not specify address for first instruction"
-        yield address, inst
-        address += INST_SIZE
+    raise RuntimeError(f"unknown macro: {code}")
 
 
 def print_summary(summary, items):

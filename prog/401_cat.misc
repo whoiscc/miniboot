@@ -1,35 +1,22 @@
-; 410_cat.misc
-; segment 0, page 0x410###
+; 401_cat.misc
+; segment 0, page 0x401### - 0x40f###
 
+0x40f000
+$.str   "Hello, world!\n"
 
 0x401000
-
-; calling convention (callee side)
-; step 0, expect arguments at stack base address
-; in this case nothing
-
-; start working
-; finish working
-
-; step 1, save return value at stack base address
-; dst = $D + 0
-ldd
+shl     40
+imm     40f000
 stb
 shl     40
+imm     1
+stc
+shl     40
+imm     e
+int     4
+
+shl     40
+stb
 imm     7
-st64
-
-; step 2, load return address
-; src = $D - 8
-ldd
-stb
-shl     40
-imm     8
-neg
-add
-stb
-ld
-
-; step 3, jump to caller
-stb
-jmp
+$sts64  0
+$ret
