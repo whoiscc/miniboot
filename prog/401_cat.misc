@@ -1,10 +1,21 @@
 ; 401_cat.misc
 ; segment 0, page 0x401### - 0x40f###
 
+; string literals
 0x40f000
-$.str   "Hello, world!\n"
+$.str   "`cat -n`\n"
+0x40f100
+$.str   "File summary: "
+0x40f200
+$.str   "line(s), "
+0x40f300
+$.str   "character(s)\n"
 
 0x401000
+; cat function
+; read from descriptor 1000, write to descriptor 1, i.e. stdout, with line number
+; finally print summary line
+
 shl     40
 imm     40f000
 stb
@@ -17,6 +28,25 @@ int     4
 
 shl     40
 stb
-imm     7
-$sts64  0
+$sts:64 0
+$ret
+
+0x401100
+; append-string function
+; arguments 
+; +0: buffer address 
+; +8: in-buffer string length before appending
+; +16: string address
+; +32: string length
+; return
+; +0: in-buffer string length after appending
+$ret
+
+0x401200
+; append-number function
+; arguments
+; +0/+8: same as append-string
+; +16: number to append
+; return
+; +0: same as append-string
 $ret

@@ -121,6 +121,11 @@ class Memory:
         self.touch_page(page_index, True)
         self.page_table[page_index].preload_instruction(page_offset, inst)
 
+    def load_instruction(self, address):
+        page_index, page_offset = address // PAGE_SIZE, address % PAGE_SIZE
+        assert page_index in self.page_table, f"segmentation fault: {address:#x}"
+        return self.page_table[page_index].load_instruction(page_offset)
+
     def get_slice(self, address, length):
         slice = []
         page_index, page_offset = address // PAGE_SIZE, address % PAGE_SIZE
@@ -147,11 +152,6 @@ class Memory:
             slice = slice[PAGE_SIZE - page_offset :]
             page_index += 1
             page_offset = 0
-
-    def load_instruction(self, address):
-        page_index, page_offset = address // PAGE_SIZE, address % PAGE_SIZE
-        assert page_index in self.page_table, f"segmentation fault: {address:#x}"
-        return self.page_table[page_index].load_instruction(page_offset)
 
 
 class Computer:
@@ -213,12 +213,13 @@ class Computer:
             inst = self.memory.load_instruction(self.pointer)
             assert inst is not None, f"illegal instruction access at {self.pointer:#x}"
             self.pointer += INST_SIZE
+            code, operand = inst["code"], inst.get("operand", None)
             # print(
             #     f"A: {self.rega:#12x} B: {self.regb:#12x} "
             #     f"C: {self.regc:#12x} D: {self.regd:#12x}"
             # )
-            # print(inst)
-            code, operand = inst["code"], inst.get("operand", None)
+            # print()
+            # print(f"{code:6}", f"{operand:#8x}" if operand else "")
             if code == "imm":
                 self.rega -= self.rega % (2 ** 24)
                 self.rega += operand
@@ -399,8 +400,8 @@ def expand_macro(code, operand, address):
             {"code": "stb"},
             {"code": "ld"},
         ]
-    if code.startswith("$sts"):
-        assert code in {"$sts8", "$sts16", "$sts32", "$sts64"}
+    if code.startswith("$sts:"):
+        assert code in {"$sts:8", "$sts:16", "$sts:32", "$sts:64"}
         offset = int(operand, base=16)
         return [
             {"code": "stc"},
@@ -412,7 +413,7 @@ def expand_macro(code, operand, address):
             {"code": "add"},
             {"code": "stb"},
             {"code": "ldc"},
-            {"code": code.replace("$sts", "st")},
+            {"code": code.replace("$sts:", "st")},
         ]
 
     raise RuntimeError(f"unknown macro: {code}")
